@@ -43,23 +43,21 @@ function seekRanges(){
 }
 function updateSeekAvailability(g,url){
   if(!currentGeneration(g,url)||!metadataReady)return;
-  const ranges=seekRanges(),available=Number.isFinite(video.duration)&&video.duration>0&&ranges.length>0;
-  seek.disabled=!available;
-  if(!available)mediaStatus('Seeking unavailable: media has no seekable ranges yet.');
+  const durationAvailable=Number.isFinite(video.duration)&&video.duration>0;
+  seek.disabled=!durationAvailable;
+  if(durationAvailable&&seekRanges().length===0)mediaStatus('Media timeline loaded; browser is still resolving seek ranges.');
   else if(room.querySelector('.media-status')?.dataset.kind==='status')clearMediaStatus();
 }
 function timeFromSlider(){
   if(!metadataReady||!Number.isFinite(video.duration)||video.duration<=0)return null;
-  const requested=video.duration*Math.max(0,Math.min(100,Number(seek.value)||0))/100;
-  const ranges=seekRanges();if(!ranges.length)return null;
-  for(const [start,end] of ranges)if(requested>=start&&requested<=end)return requested;
-  let nearest=null,distance=Infinity;
-  for(const [start,end] of ranges)for(const edge of [start,end])if(Math.abs(requested-edge)<distance){nearest=edge;distance=Math.abs(requested-edge)}
-  return nearest;
+  // An empty seekable list may be temporary while the browser resolves its
+  // byte ranges. Finite metadata still provides a legal target on this timeline.
+  const percent=Math.max(0,Math.min(100,Number(seek.value)||0));
+  return video.duration*percent/100;
 }
 function commitSeek(){
   const target=timeFromSlider();
-  if(target===null){mediaStatus('Cannot seek: video metadata or seekable range is unavailable.');return false}
+  if(target===null){mediaStatus(metadataReady?'Cannot seek: media duration is not available yet.':'Cannot seek yet: video metadata has not loaded.');return false}
   try{
     video.currentTime=target;
     timeLabel.textContent=fmt(target);
@@ -90,21 +88,23 @@ const openWork=()=>{
     video.poster=new URL(`${A}${w.cover}`,document.baseURI).href;coverLayer.src=video.poster;coverLayer.hidden=false;video.style.aspectRatio=w.ratio;
     if(!VIDEO_BASE_URL){activeMediaUrl='';mediaStatus('Video delivery is awaiting the R2 public URL.')}else{
       const url=new URL(`${VIDEO_BASE_URL}/${w.video}`).href;activeMediaUrl=url;
-    mediaStatus('Loading media…');video.src=url;video.load();
+    mediaStatus('Loading media…');
     const isCurrent=()=>currentGeneration(g,url);
-    video.onloadedmetadata=()=>{
-      if(!isCurrent())return;
+    const refreshMetadata=()=>{
+      if(!isCurrent()||video.readyState<1)return;
       metadataReady=Number.isFinite(video.duration)&&video.duration>0;
       durationLabel.textContent=metadataReady?fmt(video.duration):'—';
-      timeLabel.textContent='0:00';seek.value='0';
-      // A freshly loaded source starts at its beginning. Only assign time zero
-      // when the browser confirms that zero is inside a seekable range.
-      if(metadataReady&&seekRanges().some(([start,end])=>start<=0&&end>=0)){try{video.currentTime=0}catch(error){mediaStatus(`Unable to start at beginning: ${error.message||error}`,'error')}}
+      if(metadataReady){timeLabel.textContent=fmt(video.currentTime);if(!dragging)seek.value=String(video.currentTime/video.duration*100)}
       updateSeekAvailability(g,url);
     };
+    video.onloadedmetadata=()=>{
+      if(!isCurrent())return;
+      refreshMetadata();
+    };
+    video.ondurationchange=refreshMetadata;
     video.onloadeddata=()=>{if(isCurrent())clearMediaStatus()};
     video.onprogress=()=>updateSeekAvailability(g,url);
-    video.oncanplay=()=>updateSeekAvailability(g,url);
+    video.oncanplay=()=>{refreshMetadata();updateSeekAvailability(g,url)};
     video.ontimeupdate=()=>{
       if(!isCurrent()||dragging)return;
       timeLabel.textContent=fmt(video.currentTime);
@@ -120,6 +120,8 @@ const openWork=()=>{
       const code=video.error?.code??'unknown',message=video.error?.message||'No browser detail';
       mediaStatus(`Media load failed (${code}): ${message} — ${video.currentSrc||url}`,'error');
     };
+    // Register source-specific handlers before src/load to avoid missing early events.
+    video.src=url;video.load();
     }
   }
   room.classList.add('open');
